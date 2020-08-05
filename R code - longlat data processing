@@ -1,0 +1,126 @@
+#CODE FOR ORIGINALLY LONGLAT DATA#
+
+load("/Users/rameshwilson/Documents/Theoretical Ecology /286_2699_Dataset (1)/rCESTES/CESTES.RData")
+Metadata <- read.csv("/Users/rameshwilson/Documents/Theoretical Ecology /286_2699_Dataset (1)/rCESTES/Metadat.csv") #metadata
+
+#subset the metadata by plants only 
+PlantMetaData <- subset(Metadata, Group=="Plants")
+dat <- LSmatred[PlantMetaData$X]
+str(PlantMetaData) # data stored as nested list
+
+#explore one of the plant datasets (17 in total); make note of the coordinate unit used 
+str(dat$Cornwell2009)
+str(dat$Cornwell2009$coord)
+
+#Load some packages#
+library(ggmap)
+library(sp)
+library(rgdal)
+library(raster)
+library(ggplot2)
+library(rasterVis)
+
+#If the data is longlat, use the appropriate projection and datum below
+geo<-SpatialPoints(dat$Cornwell2009$coord, proj4string=CRS("+proj=longlat +datum=WGS84"))
+
+#Register Google API
+register_google("AIzaSyBrm1xyXEcICLz1JRT8SEQpr6N-umkQrG8library") #API key
+
+#Create the extend region as per the coordinates of the study
+#Google projects their maps using longlat, hence why the coordinates we impose on the map need to be in longlat also
+region_vert <- c(left = min(geo@coords[,1])-0.1,
+                 bottom = min(geo@coords[,2])-0.1,
+                 right = max(geo@coords[,1])+0.1,
+                 top = max(geo@coords[,2])+0.1)
+map <- get_map(region_vert)
+ggmap(map) +
+  geom_point(data=data.frame(geo@coords), aes(x=X, y=Y), colour="blue") +
+  ggtitle("Cornwell 2009 study site map")
+
+#after having made the map using longlat, you now need to create the same data as UTM, as the Earth Explorer Landsat images project in UTM coordinates 
+#Check the new UTM zone that the data will fall under; check the xmin, xmax, ymin, ymax - ensuring they all fall under the same UTM zone
+geo2<-spTransform(geo, CRS("+proj=utm +zone=50 +datum=WGS84"))
+
+#now we need to load and crop the raster files from the satellite images that we need to download; the new wd will be the folder that contains the downloaded tifs
+setwd("/Users/rameshwilson/Documents/Cornwell2009/LC08_L1TP_198031_20200222_20200225_01_T1 (1)/") #set the wd as the first satellite image
+
+#if using landsat7, then also use band 1, however for landsat8, use 2-5 (no point uploading band 1 also)
+loadGeoTiff <- function(bands = c(2,3,4,5)) {
+  rFile <- grep("B\\d+\\.", dir(), value=T)
+  fileOrder <- as.numeric(gsub("B","",stringr::str_extract(rFile, "B\\d+")))
+  rFile <- rFile[order(fileOrder)]
+  
+  rList <- list()
+  for (b in bands) {
+    rList[[length(rList)+1]] <- raster(rFile[b])
+  }
+  names(rList) <- paste0("B", bands)
+  return(rList)
+}
+
+#that's the first satellite image loaded and dissected by bands
+#now we need to crop that image to the extents of the UTM coordinates 
+r1 <- stack(loadGeoTiff())
+NAvalue(r1) <- 0 # remove black border
+e <- extent(c(0.99*min(geo2@coords[,1]),
+              1.001*max(geo2@coords[,1]),
+              0.999*min(geo2@coords[,2]),
+              1.001*max(geo2@coords[,2])))
+r1 <- crop(r1,e)
+
+*^^ for aesthetics and spacing, you can play about with the extent!
+
+plot(r1$B2) #check a single layer to visualise 
+points(geo2@coords, col="blue", pch=20) #check the coordinates lie on this cropped area (may not be all the coordinates at this stage)
+
+#Now we need to load the next satellite image; first by setting it as the new wd               
+setwd("/Users/rameshwilson/Documents/Cornwell2009/LC08_L1TP_198032_20200528_20200608_01_T1 (1)/")
+r2 <- stack(loadGeoTiff()) #the same parameters as the previous image stacking 
+NAvalue(r2) <- 0
+r2 <- crop(r2,e)
+
+#Repeat lines 77-80 for any additional images 
+
+r <- do.call(merge, c(r1,r2, tolerance=1)) # merge the two images (or more if applicable)
+names(r) <- names(r1)
+rm(r1)
+rm(r2) 
+#remove any other images you may have uploaded, cropped and merged 
+
+#if only one image is used, then simply rename 'r1' as 'r' DONT MERGE 
+
+#now we need to create an RGB colour composite
+RGB <- stack(list(r$B4, r$B3, r$B2)) # create a Red-Green-Blue stack of the appropriate layers 
+plotRGB(RGB, axes = TRUE, stretch = "lin", main = "Cornwell 2009 RGB colour composite", asp=1, xlab="UTM (Easting)", ylab="UTM (Northing)")
+points(geo2@coords, col="blue", pch=20)
+
+#scale_y_continuous(limit=c("COORDINATES RANGE HERE)) #this allows you to zoom in on the testing site if needed 
+
+#now we will compute an NDVI for the data, to assess the distribution of live green vegetation
+VI <- function(img) {  # Note this assumes only bands 2, 3, 4, and 5 are stored in the raster stack!#
+  bk <- subset(img,subset=4)
+  bi <- subset(img,subset=3)
+  vi <- (bk - bi) / (bk + bi)
+  return(vi)
+}
+
+ndvi <- VI(r)
+ndvi <- reclassify(ndvi, cbind(-Inf, 0, NA)) 
+ndvi <- reclassify(ndvi, cbind(1, Inf, NA))
+plot(ndvi, main = 'Cornwell 2009 Filtered NDVI')
+points(geo2@coords, col="blue", pch=20)
+
+#Now get the date of any images used; if multiple images, then will have to reset each directory each time
+list.files(pattern = paste0("MTL"))
+MTLdata <- read.delim(list.files(pattern = paste0("MTL")))
+View(MTLdata)
+
+#Now just save the cropped raster file in your directory! 
+writeRaster(r, "/Users/rameshwilson/Documents/Theoretical Ecology /Cornwell2009/Cornwell2009.tif", options="INTERLEAVE=BAND", overwrite=TRUE)
+
+#Check that the saved raster file has all the correct information!
+R<-stack("/Users/rameshwilson/Documents/Theoretical Ecology /Cornwell2009/Cornwell2009.tif")
+ndvi <- VI(R)
+ndvi <- reclassify(ndvi, cbind(-Inf, 0, NA)) 
+ndvi <- reclassify(ndvi, cbind(1, Inf, NA))
+plot(ndvi, main = 'Cornwell 2009 Filtered NDVI - check!')
